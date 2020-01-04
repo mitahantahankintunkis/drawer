@@ -1,16 +1,16 @@
-// Saves a state of a single stepper motor
+// Saves the state of a single stepper motor
 struct stepper {
-    // Pins on the arduino
+    // Pins on the arduino. The pins are ordered in such a way that
+    // the stepper rotates clockwise when the pins are activated in order
     unsigned char pins[4];
 
-    // Activation order of the pins represented in binary
-    unsigned char order[4];
-
     // Index used for the array above
-    char step;
+    char step_index;
 
     unsigned int stepsPerRevolution;
     float angle;
+
+    // How many steps are needed to get the arm moving after changing directions
     unsigned int slack_steps;
 
     // Length of the arm attached in millimeters
@@ -18,7 +18,7 @@ struct stepper {
 
     // Variables used for updating the stepper
     int steps_to_go;
-    bool dir;
+    bool prev_dir;
     float millis_per_step;
     unsigned long long prev_activation;
 };
@@ -27,58 +27,31 @@ typedef struct stepper Stepper;
 
 // Primary steppr
 Stepper stepper0 = {
-    .pins               = { 6, 7, 8, 9 },
-    .order              = { 0b1000, 0b0010, 0b0100, 0b0001 },
-    //.order              = { 0b0001, 0b0100, 0b0010, 0b1000 },
-    .step               = 0,
+    .pins               = { 9, 7, 8, 6 },
+    .step_index         = 0,
     .stepsPerRevolution = 1800,
     .angle              = PI / 2,
     .slack_steps        = 3,
     .length             = 175.0f,
     .steps_to_go        = 0,
-    .dir                = true,
+    .prev_dir           = true,
     .millis_per_step    = 0.0f,
     .prev_activation    = 0,
 };
 
 // Secondary stepper
 Stepper stepper1 = {
-    .pins               = { 15, 14, 16, 10 },
-    .order              = { 0b1000, 0b0010, 0b0100, 0b0001 },
-    .step               = 0,
+    .pins               = { 10, 14, 16, 15 },
+    .step_index         = 0,
     .stepsPerRevolution = 1800,
     .angle              = 0,
     .slack_steps        = 2,
     .length             = 125.0f,
     .steps_to_go        = 0,
-    .dir                = true,
+    .prev_dir           = true,
     .millis_per_step    = 0.0f,
     .prev_activation    = 0,
 };
-
-
-void singleStep(Stepper &stepper) {
-    // Changing direction
-    if (!stepper.dir) stepper.step -= 2;
-
-    // Wrapping index
-    stepper.step += 4;
-    stepper.step %= 4;
-
-    // Most likely not needed, but prevents very short
-    // duration short circuits in the H-bridges. I'm already pushing way
-    // too much current for stepper0, so I'd like to not take any changes
-    for (int i = 0; i < 4; ++i) {
-        digitalWrite(stepper.pins[i], LOW);
-    }
-
-    // Activating pins according to the order array
-    for (int i = 0; i < 4; ++i) {
-        digitalWrite(stepper.pins[i], (stepper.order[stepper.step] >> i) & 1);
-    }
-
-    ++stepper.step;
-}
 
 // Updates the given stepper if it has some steps to go and if enough
 // time has passed since the previous activation
@@ -86,16 +59,24 @@ void updateStepper(Stepper &stepper) {
     if (stepper.steps_to_go && millis() - stepper.prev_activation >= stepper.millis_per_step) {
         bool dir = stepper.steps_to_go < 0;
 
-        // Waiting for the device to settle a bit if the direction has changed
-        // Otherwise there's a change that the steppers don't have enough torque
-        // to change directions
-        if (stepper.dir != dir) {
-            stepper.dir = dir;
+        // Removing slack
+        if (stepper.prev_dir != dir) {
             stepper.steps_to_go += dir ? -stepper.slack_steps : stepper.slack_steps;
+            stepper.prev_dir = dir;
         }
 
-        singleStep(stepper);
-        stepper.steps_to_go += stepper.dir ? 1 : -1;
+        // Setting the previous pin low
+        digitalWrite(stepper.pins[stepper.step_index], LOW);
+
+        // Calculating the new index
+        stepper.step_index += stepper.prev_dir ? 1 : -1;
+        stepper.step_index += 4;
+        stepper.step_index %= 4;
+
+        // Setting the next pin high
+        digitalWrite(stepper.pins[stepper.step_index], HIGH);
+
+        stepper.steps_to_go += stepper.prev_dir ? 1 : -1;
         stepper.prev_activation = millis();
     }
 }
@@ -136,44 +117,6 @@ void rotateTo(float angle0, float angle1) {
 }
 
 
-// I have to move this into python, since floating point
-// errors start to add up after ~15 minutes of running time.
-// Arduino Pro Micro doesn't support doubles
-void moveTo(float x, float y) {
-    // Helper values for the formulas below
-    float dist       = sqrt(x*x + y*y);
-    float dist_sqr   = dist * dist;
-    float s0_len_sqr = stepper0.length * stepper0.length;
-    float s1_len_sqr = stepper1.length * stepper1.length;
-
-    // Making sure that the requested point is reachable
-    if (dist > stepper0.length + stepper1.length || dist < stepper0.length - stepper1.length) {
-        return;
-    }
-
-    // Calculating new angles for the stepper motors
-    // The two steppers and the pen form a triangle with sides of lengths
-    // stepper0.length, stepper1.length and dist. We can use this information
-    // to calculate the necessary angles
-    // https://en.wikipedia.org/wiki/Solution_of_triangles#Three_sides_given_(SSS)
-    float s0_angle =  acos((s0_len_sqr + dist_sqr - s1_len_sqr) / (2 * stepper0.length * dist));
-    float s1_angle = -acos((s1_len_sqr + dist_sqr - s0_len_sqr) / (2 * stepper1.length * dist));
-
-    // The formula above only works if stepper0 and the pen have the same
-    // y coordinate. We can fix this by adding some offset to both of the angles
-    float angle_offset = atan(y / x);
-    s0_angle += angle_offset;
-    s1_angle += angle_offset;
-
-    // Substracting stepper1's angle fron stepper0, since stepper0
-    // also rotates stepper1
-    s1_angle -= s0_angle;
-
-    // Finally rotating the motors to the calculated angles
-    rotateTo(s0_angle, s1_angle);
-}
-
-
 void setup() {
     for (int i = 0; i < 4; ++i) {
         pinMode(stepper0.pins[i], OUTPUT);
@@ -185,66 +128,25 @@ void setup() {
 
 
 void loop() {
-    // Waiting for response
+    // Waiting for a response
     Serial.flush();
     delay(1);
 
-    // Reading two floats (x, y) from serial and moving the pen
-    // to those coordinates
+    // Reading two floats (stepper0 angle, stepper1 angle) from serial
     if (Serial.available() >= sizeof(float) * 2) {
-        float a0 = 0.0;
-        float a1 = 0.0;
+        float stepper0_angle = 0.0;
+        float stepper1_angle = 0.0;
         unsigned char serialBuffer[sizeof(float) * 2];
 
+        // Reading bytes
         if (Serial.readBytes(serialBuffer, sizeof(float) * 2) == sizeof(float) * 2) {
-            memcpy(&a0, serialBuffer, sizeof(float));
-            memcpy(&a1, serialBuffer + sizeof(float), sizeof(float));
+            memcpy(&stepper0_angle, serialBuffer, sizeof(float));
+            memcpy(&stepper1_angle, serialBuffer + sizeof(float), sizeof(float));
         }
 
-        rotateTo(a0, a1);
+        rotateTo(stepper0_angle, stepper1_angle);
     } else {
-        // Telling the PC that we are ready for new coordinates
+        // Telling the PC that we are ready for new input
         Serial.write(1);
     }
 }
-
-            //if (to_a1) memcpy(&a1, serialBuffer, sizeof(float));
-            //else       memcpy(&a0, serialBuffer, sizeof(float));
-
-
-    //int tempstepperpins[] = { 15, 14, 16, 10 };
-    //int stepper0pins[] = { 6,  7,  8,  9  };
-
-    //int tempstepperorder[] = {
-    //    0, 0, 0, 1,
-    //    0, 1, 0, 0,
-    //    0, 0, 1, 0,
-    //    1, 0, 0, 0,
-    //};
-
-    //int stepper0order[] = {
-    //    0, 0, 0, 1,
-    //    0, 1, 0, 0,
-    //    0, 0, 1, 0,
-    //    1, 0, 0, 0,
-    //};
-
-    //stepper1.step = 0;
-    //stepper0.step = 0;
-
-    //stepper1.angle = -PI / 2;
-    //stepper0.angle = PI / 2;
-
-    //stepper1.stepsPerRevolution = 1800;
-    //stepper0.stepsPerRevolution = 1800;
-
-    //for (int i = 0; i < 4; ++i) {
-    //    //stepper1.pins[i] = tempstepperpins[i];
-    //    stepper0.pins[i] = stepper0pins[i];
-    //}
-
-    //for (int i = 0; i < 16; ++i) {
-    //    //stepper1.order[i] = tempstepperorder[i];
-    //    stepper0.order[i] = stepper0order[i];
-    //}
-

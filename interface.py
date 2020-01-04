@@ -88,9 +88,16 @@ def coordToAngle(point, args):
     return arm_0_angle, arm_1_angle
 
 
-
+# Sends points to the arduino over serial
 def sendPoints(points, args):
-    ser        = serial.Serial(args.port, args.baud_rate)
+    # Opening connection
+    try:
+        ser = serial.Serial(args.port, args.baud_rate)
+
+    except serial.SerialException:
+        print('Could not connect')
+        return
+
     start_time = time.time()
 
     print('\n\nConnected')
@@ -98,76 +105,51 @@ def sendPoints(points, args):
 
     for i in range(len(points)):
         # Waiting for the arduino to be ready
-        cmd = ser.read()
-        if cmd == b'\x01':
+        if ser.read() == b'\x01':
+            # Sending the next point
+            try:
+                a0, a1 = coordToAngle(points[i], args)
+                ser.write(struct.pack('<f', a0) + struct.pack('<f', a1))
+                ser.flush()
 
-            # Sending angles
-            a0, a1 = coordToAngle(points[i], args)
-            ser.write(struct.pack('<f', a0) + struct.pack('<f', a1))
-            ser.flush()
+            except serial.SerialException:
+                print('Communication error while sending angles')
+                break
 
-            # Printing progress info
+            # Printing information about the current progress
             percentage = round((i + 1) / len(points) * 100, 2)
             delta_t    = time.time() - start_time
-            delta_m    = delta_t // 60
+            delta_m    = int(delta_t // 60)
             delta_s    = round(delta_t - delta_m * 60, 1)
-            delta_m    = round(delta_m)
             m_to_go    = '?'
 
             # Remaining time
             if percentage != 0:
                 m_to_go = round((delta_t / (percentage / 100) - delta_t) // 60)
 
-            status =  f'i: {i}    '
-            status += f'X: {round(points[i][0]):>4}mm    '
-            status += f'Y: {round(points[i][1]):>4}mm      '
-            status += f'Progress: {percentage:>5}% done, '
-            status += f'{delta_m}m {delta_s}s gone,  '
-            status += f'{m_to_go}m left'
-            print(status)
+            print((f'i: {i}    '
+                   f'X: {round(points[i][0]):>4}mm    '
+                   f'Y: {round(points[i][1]):>4}mm      '
+                   f'Progress: {percentage:>5}% done, '
+                   f'{delta_m}m {delta_s}s gone,  '
+                   f'{m_to_go}m left'))
 
             # Waiting for the user to make sure that the robot is ready to draw
-            if i == 0:
-                if input('\nContinue drawing? (y/n): ').lower() != 'y':
-                    return True
-    else:
-        return True
-
-    return False
-
-
-# Continously tries to open a serial interface with the arduino and
-# send arms angles to it
-def communicationLoop(points, args):
-    done = False
-
-    # Using while loop to continue after a lost connection
-    while not done:
-        try:
-            done = sendPoints(points, args)
-
-        except (serial.SerialException, KeyboardInterrupt):
-            if input('Connection error. Retry? (y/n): ').lower() != 'y':
+            if i == 0 and input('\nContinue drawing? (y/n): ').lower() != 'y':
                 break
 
-        except Exception as e:
-            print(e)
-            break
 
-
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('coordinates', help='Path to file containing line coordinates')
 
     parser.add_argument('-x', '--width',   default=210,  type=int, help='Paper width in millimeters')
     parser.add_argument('-y', '--height',  default=297,  type=int, help='Paper height in millimeters')
-    parser.add_argument('-p', '--padding', default=50,   type=int, help='Space between the drawing and the paper\'s edges in millimeters')
+    parser.add_argument('-p', '--padding', default=40,   type=int, help='Space between the drawing and the paper\'s edges in millimeters')
     parser.add_argument('--offset_x',      default=45,   type=int, help='Paper offset in millimeters along the x axis')
     parser.add_argument('--offset_y',      default=-148, type=int, help='Paper offset in millimeters along the y axis')
     parser.add_argument('--length0',       default=175,  type=int, help='Length of the first arm')
     parser.add_argument('--length1',       default=125,  type=int, help='Length of the second arm')
-
-    #parser.add_argument('-r', '--rotate', action='store_true', help='Whether the images should be rotated 90 degrees')
 
     parser.add_argument('--port',      default='/dev/ttyACM3', type=str, help='Serial port for the arduino')
     parser.add_argument('--baud_rate', default=115200 ,        type=int, help='Baud rate for the arduino')
@@ -176,4 +158,7 @@ if __name__ == '__main__':
 
     points = loadPoints(args)
     simulateDrawing(points, args)
-    communicationLoop(points, args)
+    sendPoints(points, args)
+
+
+if __name__ == '__main__': main()
